@@ -64,23 +64,14 @@ static uint8_t sFlashBuf[4096] __attribute__((aligned(256)));
 
 #define ROM_META_MAGIC 0x44535043  // "DSPC"
 
-// Metadata layout: [0]=magic, [1]=default size, [2]=dsi size, [3]=ntrboot size, [4]=ntrbootdsi size
+// Only default.nds is required. Others can be 0 (not present).
 static bool flashHasValidRom(void)
 {
     const uint32_t* meta = (const uint32_t*)ROM_META_FLASH_ADDR;
     if (meta[0] != ROM_META_MAGIC)
         return false;
     uint32_t defaultSize = meta[1];
-    uint32_t dsiSize = meta[2];
-    uint32_t ntrbootSize = meta[3];
-    uint32_t ntrbootDsiSize = meta[4];
     if (defaultSize == 0 || defaultSize > ROM_DEFAULT_MAX_SIZE)
-        return false;
-    if (dsiSize == 0 || dsiSize > ROM_DSI_MAX_SIZE)
-        return false;
-    if (ntrbootSize == 0 || ntrbootSize > ROM_NTRBOOT_MAX_SIZE)
-        return false;
-    if (ntrbootDsiSize == 0 || ntrbootDsiSize > ROM_NTRBOOTDSI_MAX_SIZE)
         return false;
     return true;
 }
@@ -99,8 +90,16 @@ static void flashGetStoredRomSizes(void)
 
 static void setRomToDsiRom(void)
 {
-    gNtrRomEmu.romData = gDsiRom;
-    gNtrRomEmu.romSize = gLoadedDsiRomSize;
+    if (gLoadedDsiRomSize > 0)
+    {
+        gNtrRomEmu.romData = gDsiRom;
+        gNtrRomEmu.romSize = gLoadedDsiRomSize;
+    }
+    else
+    {
+        gNtrRomEmu.romData = gDefaultRom;
+        gNtrRomEmu.romSize = gLoadedDefaultRomSize;
+    }
     gNtrRomEmu.cardId = CARD_ID_TWL;
     gNtrRomEmu.isDSMode = true;
 }
@@ -332,13 +331,13 @@ static bool loadRomToFlash(const char* filename, uint32_t flashOffset, uint32_t 
 static bool loadRomsFromSd(void)
 {
     bool defaultOk = loadRomToFlash("default.nds", ROM_DEFAULT_FLASH_OFFSET, ROM_DEFAULT_MAX_SIZE, &gLoadedDefaultRomSize);
-    bool dsiOk = loadRomToFlash("dsimode.nds", ROM_DSI_FLASH_OFFSET, ROM_DSI_MAX_SIZE, &gLoadedDsiRomSize);
-    bool ntrbootOk = loadRomToFlash("ntrboot.nds", ROM_NTRBOOT_FLASH_OFFSET, ROM_NTRBOOT_MAX_SIZE, &gLoadedNtrbootRomSize);
-    bool ntrbootDsiOk = loadRomToFlash("ntrbootdsi.nds", ROM_NTRBOOTDSI_FLASH_OFFSET, ROM_NTRBOOTDSI_MAX_SIZE, &gLoadedNtrbootDsiRomSize);
+    // Optional ROMs — size stays 0 if file not found
+    loadRomToFlash("dsimode.nds", ROM_DSI_FLASH_OFFSET, ROM_DSI_MAX_SIZE, &gLoadedDsiRomSize);
+    loadRomToFlash("ntrboot.nds", ROM_NTRBOOT_FLASH_OFFSET, ROM_NTRBOOT_MAX_SIZE, &gLoadedNtrbootRomSize);
+    loadRomToFlash("ntrbootdsi.nds", ROM_NTRBOOTDSI_FLASH_OFFSET, ROM_NTRBOOTDSI_MAX_SIZE, &gLoadedNtrbootDsiRomSize);
 
-    if (defaultOk && dsiOk && ntrbootOk && ntrbootDsiOk)
+    if (defaultOk)
     {
-        // Write metadata so fast path works on next boot
         flashWriteMetadata();
         gpio_put(PIN_LED_BLUE, 1);
         return true;

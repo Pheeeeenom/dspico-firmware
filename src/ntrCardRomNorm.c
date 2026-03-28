@@ -74,17 +74,38 @@ static void __time_critical_func(normCmd0Handler)(struct ntr_rom_emu_t* romEmu, 
                 // so if the elapsed time is more than that amount, we're no longer being read by a DSi
                 else if (elapsed_systick > NS_SYSTICK(2067540))
                 {
-                    //Console is 3DS, trying to load a ntrboot image, load 3ds ntrboot rom
-                    romEmu->romData = gNtrbootRom;
-                    romEmu->romSize = gLoadedNtrbootRomSize;
+                    //Console is 3DS, trying to load a ntrboot image
+                    if (gLoadedNtrbootRomSize > 0)
+                    {
+                        romEmu->romData = gNtrbootRom;
+                        romEmu->romSize = gLoadedNtrbootRomSize;
+                    }
+                    else
+                    {
+                        romEmu->romData = gDefaultRom;
+                        romEmu->romSize = gLoadedDefaultRomSize;
+                    }
                 }
                 // the ds takes around 2056020 nanoseconds to send the command after sending 9f
                 // so if the elapsed time is more than that amount, we're no longer being read by a ds
                 else if (elapsed_systick > NS_SYSTICK(2056020))
                 {
-                    //Console is DSi, trying to load a ntrboot image, load dsi ntrboot rom
-                    romEmu->romData = gNtrbootDsiRom;
-                    romEmu->romSize = gLoadedNtrbootDsiRomSize;
+                    //Console is DSi, trying to load a ntrboot image
+                    if (gLoadedNtrbootDsiRomSize > 0)
+                    {
+                        romEmu->romData = gNtrbootDsiRom;
+                        romEmu->romSize = gLoadedNtrbootDsiRomSize;
+                    }
+                    else if (gLoadedNtrbootRomSize > 0)
+                    {
+                        romEmu->romData = gNtrbootRom;
+                        romEmu->romSize = gLoadedNtrbootRomSize;
+                    }
+                    else
+                    {
+                        romEmu->romData = gDefaultRom;
+                        romEmu->romSize = gLoadedDefaultRomSize;
+                    }
                 }
                 else
                 {
