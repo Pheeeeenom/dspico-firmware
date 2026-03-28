@@ -79,7 +79,7 @@ typedef struct ntr_rom_emu_t
 #endif
     u32 romSize;
     bf_context_t blowfish;
-#if defined(DETECT_CONSOLE_TYPE) || defined(ENABLE_NTRBOOT_AUTO_DETECTION)
+#ifdef DETECT_CONSOLE_TYPE
     u16 previousCommand;
     bool isDSMode;
 #endif

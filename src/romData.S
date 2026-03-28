@@ -1,40 +1,16 @@
 .section .flashdata,"a"
 
+@ All ROMs loaded from SD card to flash at runtime.
 .global gDefaultRom
-gDefaultRom:
-    .incbin "../roms/default.nds"
+.equ gDefaultRom, (0x10000000 + 0x040000)
 
-gDefaultRomDataEnd:
-.global gDefaultRomSize
-.equ gDefaultRomSize, gDefaultRomDataEnd - gDefaultRom
-
-#if defined(DETECT_CONSOLE_TYPE)
-.global gDsiRom
-gDsiRom:
-    .incbin "../roms/dsimode.nds"
-
-gDsiRomDataEnd:
-.global gDsiRomSize
-.equ gDsiRomSize, gDsiRomDataEnd - gDsiRom
-#endif
-
-#if defined(ENABLE_NTRBOOT_AUTO_DETECTION)
 .global gNtrbootRom
-gNtrbootRom:
-    .incbin "../roms/ntrboot.nds"
+.equ gNtrbootRom, (0x10000000 + 0x0E0000)
 
-gNtrbootRomEnd:
-.global gNtrbootRomSize
-.equ gNtrbootRomSize, gNtrbootRomEnd - gNtrbootRom
-
-#if defined(ENABLE_NTRBOOT_CONSOLE_TYPE_DETECTION)
 .global gNtrbootDsiRom
-gNtrbootDsiRom:
-    .incbin "../roms/ntrbootdsi.nds"
+.equ gNtrbootDsiRom, (0x10000000 + 0x0F0000)
 
-gNtrbootDsiRomEnd:
-.global gNtrbootDsiRomSize
-.equ gNtrbootDsiRomSize, gNtrbootDsiRomEnd - gNtrbootDsiRom
-#endif
-#endif
+.global gDsiRom
+.equ gDsiRom, (0x10000000 + 0x100000)
+
 .end

@@ -9,7 +9,7 @@ add_compile_definitions(DSpico
   PICO_STACK_SIZE=0x600
   PICO_CORE1_STACK_SIZE=0x400
   ENABLE_R4_MODE
-  #DSPICO_ENABLE_WRFUXXED # This macro enables the WRFUXXED exploit to work.
+  DSPICO_ENABLE_WRFUXXED # This macro enables the WRFUXXED exploit to work.
   # ENABLE_PREVENT_DSI_AUTOBOOT # meant to be used with WRFU, doesn't work properly on the 3ds
 )
 
@@ -76,31 +76,22 @@ add_executable(DSpico
   src/sd/fatfs/ffsystem.c
 )
 
-if(EXISTS "${CMAKE_SOURCE_DIR}/roms/default.nds" AND EXISTS "${CMAKE_SOURCE_DIR}/roms/dsimode.nds")
-  target_compile_definitions(DSpico PRIVATE
-    DETECT_CONSOLE_TYPE # This macro enables the firmware to switch the rom based on which console is detected. You shouldn't change this.
-  )
-endif()
-
-if(EXISTS "${CMAKE_SOURCE_DIR}/roms/ntrbootdsi.nds" AND NOT EXISTS "${CMAKE_SOURCE_DIR}/roms/ntrboot.nds")
-  message(FATAL_ERROR "Dsi ntrboot rom provided without 3DS ntrboot counterpart.")
-endif()
-
-if(EXISTS "${CMAKE_SOURCE_DIR}/roms/ntrboot.nds")
-  target_compile_definitions(DSpico PRIVATE
-    ENABLE_NTRBOOT_AUTO_DETECTION # This macro enables the firmware to detect if the cart is being read from within a ntrboot context (3DS or DSi) and switch rom accordingly.
-  )
-endif()
-
-if(EXISTS "${CMAKE_SOURCE_DIR}/roms/ntrboot.nds" AND EXISTS "${CMAKE_SOURCE_DIR}/roms/ntrbootdsi.nds")
-  target_compile_definitions(DSpico PRIVATE
-    ENABLE_NTRBOOT_CONSOLE_TYPE_DETECTION # This macro enables the firmware to detect if when the cart is being read in a ntrboot context, the console reading it is a 3DS or a DSi, and switch rom accordingly.
-  )
-endif()
+target_compile_definitions(DSpico PRIVATE
+    DETECT_CONSOLE_TYPE # Always enabled - all ROMs loaded from SD
+    ENABLE_NTRBOOT_AUTO_DETECTION # Detect ntrboot context via systick timing
+    ENABLE_NTRBOOT_CONSOLE_TYPE_DETECTION # Separate ntrboot ROMs for 3DS vs DSi
+)
 
 pico_generate_pio_header(DSpico ${CMAKE_CURRENT_LIST_DIR}/src/ntrCard.pio)
 pico_generate_pio_header(DSpico ${CMAKE_CURRENT_LIST_DIR}/src/sd/rp2040_sdio.pio)
 
 pico_enable_stdio_uart(DSpico 1)
 pico_add_extra_outputs(DSpico)
-target_link_libraries(DSpico pico_stdlib hardware_pio hardware_dma pico_multicore)
+target_link_libraries(DSpico pico_stdlib hardware_pio hardware_dma hardware_flash pico_multicore)
+
+# Post-build: show flash and RAM usage
+add_custom_command(TARGET DSpico POST_BUILD
+    COMMAND arm-none-eabi-size ${CMAKE_BINARY_DIR}/DSpico.elf
+    COMMAND ${CMAKE_COMMAND} -E echo "Flash layout: firmware < 256 KB | default.nds < 640 KB | ntrboot.nds < 64 KB | ntrbootdsi.nds < 64 KB | dsimode.nds < 1024 KB"
+    VERBATIM
+)

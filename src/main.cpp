@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include "hardware/gpio.h"
 #include "hardware/dma.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
 #include "hardware/structs/scb.h"
 #include "hardware/structs/systick.h"
 #include "pico/binary_info.h"
@@ -18,7 +20,6 @@
 #include "sd/SdCard.h"
 #include "scramblerRing.h"
 #include "pico/bootrom.h"
-#include "hardware/clocks.h"
 #include "hardware/xosc.h"
 #include "powerSaving.h"
 
@@ -27,31 +28,81 @@ FATFS sFatFs;
 SdCard gSdCard;
 static bool sIsSdCardMounted;
 
-#ifdef DETECT_CONSOLE_TYPE
+// ROM loaded from SD card to flash
+uint32_t gLoadedDefaultRomSize = 0;
+uint32_t gLoadedDsiRomSize = 0;
+uint32_t gLoadedNtrbootRomSize = 0;
+uint32_t gLoadedNtrbootDsiRomSize = 0;
+
+// Flash layout:
+// 0x000000 - 0x03EFFF: Firmware (~60 KB actual, 252 KB reserved)
+// 0x03F000 - 0x03FFFF: Metadata sector (magic + ROM sizes)
+// 0x040000 - 0x0DFFFF: default.nds (640 KB max)
+// 0x0E0000 - 0x0EFFFF: ntrboot.nds (64 KB max)
+// 0x0F0000 - 0x0FFFFF: ntrbootdsi.nds (64 KB max)
+// 0x100000 - 0x1FFFFF: dsimode.nds (1024 KB max)
+#define ROM_META_FLASH_OFFSET       ((256 * 1024) - FLASH_SECTOR_SIZE)
+#define ROM_META_FLASH_ADDR         (XIP_BASE + ROM_META_FLASH_OFFSET)
+
+#define ROM_DEFAULT_FLASH_OFFSET    (256 * 1024)
+#define ROM_DEFAULT_FLASH_ADDR      (XIP_BASE + ROM_DEFAULT_FLASH_OFFSET)
+#define ROM_DEFAULT_MAX_SIZE        (640 * 1024)
+
+#define ROM_NTRBOOT_FLASH_OFFSET    (896 * 1024)
+#define ROM_NTRBOOT_FLASH_ADDR      (XIP_BASE + ROM_NTRBOOT_FLASH_OFFSET)
+#define ROM_NTRBOOT_MAX_SIZE        (64 * 1024)
+
+#define ROM_NTRBOOTDSI_FLASH_OFFSET (960 * 1024)
+#define ROM_NTRBOOTDSI_FLASH_ADDR   (XIP_BASE + ROM_NTRBOOTDSI_FLASH_OFFSET)
+#define ROM_NTRBOOTDSI_MAX_SIZE     (64 * 1024)
+
+#define ROM_DSI_FLASH_OFFSET        (1024 * 1024)
+#define ROM_DSI_FLASH_ADDR          (XIP_BASE + ROM_DSI_FLASH_OFFSET)
+#define ROM_DSI_MAX_SIZE            (1024 * 1024)
+
+static uint8_t sFlashBuf[4096] __attribute__((aligned(256)));
+
+#define ROM_META_MAGIC 0x44535043  // "DSPC"
+
+// Metadata layout: [0]=magic, [1]=default size, [2]=dsi size, [3]=ntrboot size, [4]=ntrbootdsi size
+static bool flashHasValidRom(void)
+{
+    const uint32_t* meta = (const uint32_t*)ROM_META_FLASH_ADDR;
+    if (meta[0] != ROM_META_MAGIC)
+        return false;
+    uint32_t defaultSize = meta[1];
+    uint32_t dsiSize = meta[2];
+    uint32_t ntrbootSize = meta[3];
+    uint32_t ntrbootDsiSize = meta[4];
+    if (defaultSize == 0 || defaultSize > ROM_DEFAULT_MAX_SIZE)
+        return false;
+    if (dsiSize == 0 || dsiSize > ROM_DSI_MAX_SIZE)
+        return false;
+    if (ntrbootSize == 0 || ntrbootSize > ROM_NTRBOOT_MAX_SIZE)
+        return false;
+    if (ntrbootDsiSize == 0 || ntrbootDsiSize > ROM_NTRBOOTDSI_MAX_SIZE)
+        return false;
+    return true;
+}
+
+static void flashGetStoredRomSizes(void)
+{
+    const uint32_t* meta = (const uint32_t*)ROM_META_FLASH_ADDR;
+    gLoadedDefaultRomSize = meta[1];
+    gLoadedDsiRomSize = meta[2];
+    gLoadedNtrbootRomSize = meta[3];
+    gLoadedNtrbootDsiRomSize = meta[4];
+}
+
+#define PIN_LED_RED     27
+#define PIN_LED_BLUE    28
+
 static void setRomToDsiRom(void)
 {
     gNtrRomEmu.romData = gDsiRom;
-    gNtrRomEmu.romSize = ((u32)gDsiRomSize + 511) & ~511;
+    gNtrRomEmu.romSize = gLoadedDsiRomSize;
     gNtrRomEmu.cardId = CARD_ID_TWL;
     gNtrRomEmu.isDSMode = true;
-}
-#endif
-static void setRomToMainRom(void)
-{
-    gNtrRomEmu.romData = gDefaultRom;
-    gNtrRomEmu.romSize = (u32)gDefaultRomSize;
-    gNtrRomEmu.romSize = (gNtrRomEmu.romSize + 511) & ~511;
-    // We support DSi mode if the firmware is dual mode, or if a single rom has the DSi flag set
-    gNtrRomEmu.cardId = CARD_ID_TWL;
-#ifndef DETECT_CONSOLE_TYPE
-    if ((gDefaultRom[0x12] & 2) == 0)
-    {
-        gNtrRomEmu.cardId = CARD_ID_NTR;
-    }
-#endif
-#if defined(DETECT_CONSOLE_TYPE) || defined(ENABLE_NTRBOOT_AUTO_DETECTION)
-    gNtrRomEmu.isDSMode = true;
-#endif
 }
 
 static void resetNtrCard(void)
@@ -83,14 +134,9 @@ static void resetNtrCard(void)
     irq_set_enabled(PIO0_IRQ_0, true);
     pio_sm_exec(pio0, 0, pio_encode_jmp(sProgramOffset));
     pio_sm_set_enabled(pio0, 0, true);
-#if defined(ENABLE_NTRBOOT_AUTO_DETECTION)
     pwr_disableSysTickClock();
-#endif
-#ifdef DETECT_CONSOLE_TYPE
     setRomToDsiRom();
-#elif defined(ENABLE_NTRBOOT_AUTO_DETECTION)
-    setRomToMainRom();
-#endif
+    gNtrRomEmu.cardId = 0xC00000C2;
 #ifdef DSPICO_ENABLE_WRFUXXED
     ntrc_resetSpiUart();
 #endif
@@ -184,65 +230,130 @@ static void tryRebootToBootsel(void)
     }
 }
 
-int __time_critical_func(main)()
+// ---- Flash programming for SD-loaded ROM ----
+
+// Must run from RAM - flash is inaccessible during erase/program
+static void __no_inline_not_in_flash_func(flashEraseSector)(uint32_t offset)
 {
-    bi_decl(bi_program_description("Ntr card emulator"));
-    bi_decl(bi_pin_mask_with_name(0xFF000, "Ntr card D0-D7"));
-    bi_decl(bi_1pin_with_name(PIN_IRQ, "Ntr card irq"));
-    bi_decl(bi_1pin_with_name(PIN_CEB, "Ntr card ceb (rom enable)"));
-    bi_decl(bi_1pin_with_name(PIN_WREB, "Ntr card wreb (clock)"));
-    bi_decl(bi_1pin_with_name(PIN_RST, "Ntr card reset"));
-    bi_decl(bi_1pin_with_name(PIN_CS2, "Ntr card cs2 (spi enable)"));
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(offset, FLASH_SECTOR_SIZE);
+    restore_interrupts(ints);
+}
 
-    // u64 bootTime = time_us_64();
+static void __no_inline_not_in_flash_func(flashProgramChunk)(uint32_t offset, const uint8_t* data, uint32_t len)
+{
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_program(offset, data, len);
+    restore_interrupts(ints);
+}
 
-    // set_sys_clock_khz(/*125000*/200000, true);
-    // 200 MHz = 1200 MHz / 6 / 1
-    set_sys_clock_pll(1200000000, 6, 1);
+static void flashWriteMetadata(void)
+{
+    memset(sFlashBuf, 0xFF, FLASH_SECTOR_SIZE);
+    uint32_t magic = ROM_META_MAGIC;
+    memcpy(sFlashBuf, &magic, sizeof(magic));
+    memcpy(sFlashBuf + 4, &gLoadedDefaultRomSize, sizeof(gLoadedDefaultRomSize));
+    memcpy(sFlashBuf + 8, &gLoadedDsiRomSize, sizeof(gLoadedDsiRomSize));
+    memcpy(sFlashBuf + 12, &gLoadedNtrbootRomSize, sizeof(gLoadedNtrbootRomSize));
+    memcpy(sFlashBuf + 16, &gLoadedNtrbootDsiRomSize, sizeof(gLoadedNtrbootDsiRomSize));
+    flashEraseSector(ROM_META_FLASH_OFFSET);
+    flashProgramChunk(ROM_META_FLASH_OFFSET, sFlashBuf, 256);
+}
 
-    dma_channel_claim(0);
+static bool loadRomToFlash(const char* filename, uint32_t flashOffset, uint32_t maxSize, uint32_t* sizeOut)
+{
+    FIL fil;
+    FRESULT res = f_open(&fil, filename, FA_READ);
+    if (res != FR_OK)
+        return false;
 
-    memset(&gNtrRomEmu, 0, sizeof(gNtrRomEmu));
+    FSIZE_t fileSize = f_size(&fil);
+    if (fileSize == 0 || fileSize > maxSize)
+    {
+        f_close(&fil);
+        return false;
+    }
 
-    multicore_launch_core1(core1_entry);
+    uint32_t alignedSize = (uint32_t)((fileSize + 511) & ~511);
 
-    gpio_init_mask(PIN_INPUT_MASK);
-    gpio_set_dir_in_masked(PIN_INPUT_MASK);
-    gpio_init(PIN_IRQ);
-    gpio_put(PIN_IRQ, 0);
-    gpio_set_dir(PIN_IRQ, GPIO_OUT);
-    gpio_disable_pulls(PIN_D0);
-    gpio_disable_pulls(PIN_D1);
-    gpio_disable_pulls(PIN_D2);
-    gpio_disable_pulls(PIN_D3);
-    gpio_disable_pulls(PIN_D4);
-    gpio_disable_pulls(PIN_D5);
-    gpio_disable_pulls(PIN_D6);
-    gpio_disable_pulls(PIN_D7);
-    gpio_set_slew_rate(PIN_D0, GPIO_SLEW_RATE_FAST);
-    gpio_set_slew_rate(PIN_D1, GPIO_SLEW_RATE_FAST);
-    gpio_set_slew_rate(PIN_D2, GPIO_SLEW_RATE_FAST);
-    gpio_set_slew_rate(PIN_D3, GPIO_SLEW_RATE_FAST);
-    gpio_set_slew_rate(PIN_D4, GPIO_SLEW_RATE_FAST);
-    gpio_set_slew_rate(PIN_D5, GPIO_SLEW_RATE_FAST);
-    gpio_set_slew_rate(PIN_D6, GPIO_SLEW_RATE_FAST);
-    gpio_set_slew_rate(PIN_D7, GPIO_SLEW_RATE_FAST);
-    gpio_pull_up(PIN_CEB);
-    gpio_pull_up(PIN_WREB);
-    gpio_pull_down(PIN_RST);
-    gpio_pull_up(PIN_CS2);
-    gpio_set_drive_strength(PIN_D0, GPIO_DRIVE_STRENGTH_2MA);
-    gpio_set_drive_strength(PIN_D1, GPIO_DRIVE_STRENGTH_2MA);
-    gpio_set_drive_strength(PIN_D2, GPIO_DRIVE_STRENGTH_2MA);
-    gpio_set_drive_strength(PIN_D3, GPIO_DRIVE_STRENGTH_2MA);
-    gpio_set_drive_strength(PIN_D4, GPIO_DRIVE_STRENGTH_2MA);
-    gpio_set_drive_strength(PIN_D5, GPIO_DRIVE_STRENGTH_2MA);
-    gpio_set_drive_strength(PIN_D6, GPIO_DRIVE_STRENGTH_2MA);
-    gpio_set_drive_strength(PIN_D7, GPIO_DRIVE_STRENGTH_2MA);
+    // Quick check: compare first 512 bytes to see if flash already matches
+    UINT bytesRead;
+    res = f_read(&fil, sFlashBuf, 512, &bytesRead);
+    if (res != FR_OK || bytesRead != 512)
+    {
+        f_close(&fil);
+        return false;
+    }
 
-#if !defined(DETECT_CONSOLE_TYPE) && !defined(ENABLE_NTRBOOT_AUTO_DETECTION)
-    setRomToMainRom();
-#endif
+    const uint8_t* flashRom = (const uint8_t*)(XIP_BASE + flashOffset);
+    if (memcmp(sFlashBuf, flashRom, 512) == 0)
+    {
+        // Flash already has the right data, skip reprogramming
+        f_close(&fil);
+        *sizeOut = alignedSize;
+        return true;
+    }
+
+    // ROM has changed - reprogram flash
+    f_lseek(&fil, 0);
+
+    uint32_t offset = 0;
+    uint32_t blinkCounter = 0;
+    while (offset < fileSize)
+    {
+        UINT toRead = fileSize - offset;
+        if (toRead > FLASH_SECTOR_SIZE)
+            toRead = FLASH_SECTOR_SIZE;
+
+        res = f_read(&fil, sFlashBuf, toRead, &bytesRead);
+        if (res != FR_OK || bytesRead == 0)
+            break;
+
+        // Pad to 256-byte boundary for flash programming
+        uint32_t padded = (bytesRead + 255) & ~255;
+        if (padded > bytesRead)
+            memset(sFlashBuf + bytesRead, 0xFF, padded - bytesRead);
+
+        flashEraseSector(flashOffset + offset);
+        flashProgramChunk(flashOffset + offset, sFlashBuf, padded);
+
+        // Blink red LED during programming
+        gpio_put(PIN_LED_RED, (++blinkCounter) & 1);
+
+        offset += bytesRead;
+    }
+
+    gpio_put(PIN_LED_RED, 0);
+    f_close(&fil);
+    *sizeOut = alignedSize;
+    return true;
+}
+
+static bool loadRomsFromSd(void)
+{
+    bool defaultOk = loadRomToFlash("default.nds", ROM_DEFAULT_FLASH_OFFSET, ROM_DEFAULT_MAX_SIZE, &gLoadedDefaultRomSize);
+    bool dsiOk = loadRomToFlash("dsimode.nds", ROM_DSI_FLASH_OFFSET, ROM_DSI_MAX_SIZE, &gLoadedDsiRomSize);
+    bool ntrbootOk = loadRomToFlash("ntrboot.nds", ROM_NTRBOOT_FLASH_OFFSET, ROM_NTRBOOT_MAX_SIZE, &gLoadedNtrbootRomSize);
+    bool ntrbootDsiOk = loadRomToFlash("ntrbootdsi.nds", ROM_NTRBOOTDSI_FLASH_OFFSET, ROM_NTRBOOTDSI_MAX_SIZE, &gLoadedNtrbootDsiRomSize);
+
+    if (defaultOk && dsiOk && ntrbootOk && ntrbootDsiOk)
+    {
+        // Write metadata so fast path works on next boot
+        flashWriteMetadata();
+        gpio_put(PIN_LED_BLUE, 1);
+        return true;
+    }
+
+    return false;
+}
+
+// ---- Cart protocol setup ----
+
+static void setupCartProtocol(void)
+{
+    gNtrRomEmu.cardId = CARD_ID_TWL;
+    setRomToDsiRom();
+    gNtrRomEmu.isDSMode = true;
 
     sProgramOffset = pio_add_program(pio0, &ntr_card_program);
 #ifdef DSPICO_ENABLE_WRFUXXED
@@ -280,28 +391,109 @@ int __time_critical_func(main)()
     irq_set_enabled(IO_IRQ_BANK0, true);
 
     irq_init_priorities();
-#ifdef ENABLE_NTRBOOT_AUTO_DETECTION
-    // Setup the systick timer with the processor clock as clock source (running at 200mhz, we get a 5ns resolution)
+    // Setup the systick timer with the processor clock as clock source (200MHz = 5ns resolution)
     systick_hw->csr = 0x5;
-    // Sets the reload value to the maximum
     systick_hw->rvr = 0x00ffffff;
-#else
-    pwr_disableSysTickClock();
-#endif
     irq_set_priority(PIO0_IRQ_0, 0x40);
     irq_set_priority(IO_IRQ_BANK0, 0x40);
     irq_set_priority(USBCTRL_IRQ, 0x80);
     irq_set_priority(DMA_IRQ_1, 0x80);
     irq_set_priority(TIMER_IRQ_0, 0x80);
 
-    // printf("Starting\n");
-    // printf("sProgramOffset %d\n", sProgramOffset);
-    // printf("Boot time %d\n", (u32)bootTime);
     resetNtrCard();
-    sIsSdCardMounted = false;
-    initSd();
+}
 
-    tryRebootToBootsel();
+// ---- Main ----
+
+int __time_critical_func(main)()
+{
+    bi_decl(bi_program_description("Ntr card emulator"));
+    bi_decl(bi_pin_mask_with_name(0xFF000, "Ntr card D0-D7"));
+    bi_decl(bi_1pin_with_name(PIN_IRQ, "Ntr card irq"));
+    bi_decl(bi_1pin_with_name(PIN_CEB, "Ntr card ceb (rom enable)"));
+    bi_decl(bi_1pin_with_name(PIN_WREB, "Ntr card wreb (clock)"));
+    bi_decl(bi_1pin_with_name(PIN_RST, "Ntr card reset"));
+    bi_decl(bi_1pin_with_name(PIN_CS2, "Ntr card cs2 (spi enable)"));
+
+    // 200 MHz = 1200 MHz / 6 / 1
+    set_sys_clock_pll(1200000000, 6, 1);
+
+    dma_channel_claim(0);
+
+    memset(&gNtrRomEmu, 0, sizeof(gNtrRomEmu));
+
+    multicore_launch_core1(core1_entry);
+
+    // GPIO init
+    gpio_init_mask(PIN_INPUT_MASK);
+    gpio_set_dir_in_masked(PIN_INPUT_MASK);
+    gpio_init(PIN_IRQ);
+    gpio_put(PIN_IRQ, 0);
+    gpio_set_dir(PIN_IRQ, GPIO_OUT);
+    gpio_disable_pulls(PIN_D0);
+    gpio_disable_pulls(PIN_D1);
+    gpio_disable_pulls(PIN_D2);
+    gpio_disable_pulls(PIN_D3);
+    gpio_disable_pulls(PIN_D4);
+    gpio_disable_pulls(PIN_D5);
+    gpio_disable_pulls(PIN_D6);
+    gpio_disable_pulls(PIN_D7);
+    gpio_set_slew_rate(PIN_D0, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(PIN_D1, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(PIN_D2, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(PIN_D3, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(PIN_D4, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(PIN_D5, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(PIN_D6, GPIO_SLEW_RATE_FAST);
+    gpio_set_slew_rate(PIN_D7, GPIO_SLEW_RATE_FAST);
+    gpio_pull_up(PIN_CEB);
+    gpio_pull_up(PIN_WREB);
+    gpio_pull_down(PIN_RST);
+    gpio_pull_up(PIN_CS2);
+    gpio_set_drive_strength(PIN_D0, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(PIN_D1, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(PIN_D2, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(PIN_D3, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(PIN_D4, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(PIN_D5, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(PIN_D6, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(PIN_D7, GPIO_DRIVE_STRENGTH_2MA);
+
+    // Initialize status LEDs
+    gpio_init(PIN_LED_RED);
+    gpio_init(PIN_LED_BLUE);
+    gpio_set_dir(PIN_LED_RED, GPIO_OUT);
+    gpio_set_dir(PIN_LED_BLUE, GPIO_OUT);
+    gpio_put(PIN_LED_RED, 0);
+    gpio_put(PIN_LED_BLUE, 0);
+
+    // FAST PATH: ROM already in flash from previous boot
+    if (flashHasValidRom())
+    {
+        flashGetStoredRomSizes();
+       // gpio_put(PIN_LED_BLUE, 1);
+        setupCartProtocol();
+
+        // Single SD init for game-time access
+        sIsSdCardMounted = false;
+        initSd();
+        tryRebootToBootsel();
+    }
+    else
+    {
+        // COLD PATH: no ROM in flash, must load from SD first (requires pre-power)
+        sIsSdCardMounted = false;
+        initSd();
+
+        if (!sIsSdCardMounted)
+        {
+            xosc_init();
+            reset_usb_boot(0, 0);
+        }
+
+        loadRomsFromSd();
+        setupCartProtocol();
+    }
 
     pwr_initPowerSaving();
 
