@@ -174,23 +174,29 @@ void __scratch_x("cpu1") core1_entry(void)
 {
     irq_set_mask_enabled(~0u, false);
     scb_hw->scr |= M0PLUS_SCR_SLEEPDEEP_BITS;
-    while (!gComputeScrambler)
+    while (1) // CORE1 POWER EDIT: outer loop now wraps everything
     {
-        gScramblerRingWPtr = gScramblerRing;
-        __wfe();
-    }
-    while (1)
-    {
-        u32* wPtr = gScramblerRingWPtr;
-        u32* next = SCR_RING_WRAP(wPtr + 1);
-        if (next == gNtrRomEmu.scrRingRPtr)
+        // Deep sleep until scrambler is needed
+        while (!gComputeScrambler)
         {
+            gScramblerRingWPtr = gScramblerRing;
             __wfe();
-            continue;
         }
+        // Compute scrambler values until told to stop
+        while (gComputeScrambler) // CORE1 POWER EDIT: was while(1), now checks flag
+        {
+            u32* wPtr = gScramblerRingWPtr;
+            u32* next = SCR_RING_WRAP(wPtr + 1);
+            if (next == gNtrRomEmu.scrRingRPtr)
+            {
+                __wfe();
+                continue;
+            }
 
-        *wPtr = scr_getNext32(&gScramblerState);
-        gScramblerRingWPtr = next;
+            *wPtr = scr_getNext32(&gScramblerState);
+            gScramblerRingWPtr = next;
+        }
+        // gComputeScrambler went false (card reset) — loop back to deep sleep
     }
 }
 
@@ -414,8 +420,9 @@ int __time_critical_func(main)()
     bi_decl(bi_1pin_with_name(PIN_RST, "Ntr card reset"));
     bi_decl(bi_1pin_with_name(PIN_CS2, "Ntr card cs2 (spi enable)"));
 
-    // 200 MHz = 1200 MHz / 6 / 1
-    set_sys_clock_pll(1200000000, 6, 1);
+    // CLOCK EDIT: 150 MHz = 1200 MHz / 4 / 2 (was 200 MHz = 1200 / 6 / 1)
+    // Saves ~8-12 mW. To revert: set_sys_clock_pll(1200000000, 6, 1)
+    set_sys_clock_pll(1200000000, 4, 2);
 
     dma_channel_claim(0);
 
@@ -458,6 +465,14 @@ int __time_critical_func(main)()
     gpio_set_drive_strength(PIN_D6, GPIO_DRIVE_STRENGTH_2MA);
     gpio_set_drive_strength(PIN_D7, GPIO_DRIVE_STRENGTH_2MA);
 
+    // SDIO pins — 2 mA sufficient with external 10k pull-ups
+    gpio_set_drive_strength(SDIO_CLK, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(SDIO_CMD, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(SDIO_D0, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(SDIO_D1, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(SDIO_D2, GPIO_DRIVE_STRENGTH_2MA);
+    gpio_set_drive_strength(SDIO_D3, GPIO_DRIVE_STRENGTH_2MA);
+
     // Initialize status LEDs
     gpio_init(PIN_LED_RED);
     gpio_init(PIN_LED_BLUE);
@@ -498,7 +513,6 @@ int __time_critical_func(main)()
 
     while (1)
     {
-        gSdCard.Update();
         gSdCard.Update();
     #ifdef ENABLE_R4_MODE
         ntrc_gameR4Update();

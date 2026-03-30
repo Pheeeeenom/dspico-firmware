@@ -427,6 +427,53 @@ sdio_status_t rp2040_sdio_rx_continue(uint8_t* buffer, uint32_t num_blocks)
     return SDIO_OK;
 }
 
+sdio_status_t rp2040_sdio_rx_short_start(uint8_t *buffer, uint32_t bytes)
+{
+    // Initialize PIO data state machine for rx
+    pio_sm_init(SDIO_PIO, SDIO_DATA_SM, g_sdio.pio_data_rx_offset, &g_sdio.pio_cfg_data_rx);
+    pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_DATA_SM, SDIO_D0, 4, false);
+
+    // Set up simple DMA: PIO RX FIFO -> buffer
+    // Each PIO read gives one 32-bit word (4 nibbles -> 2 bytes after bit reordering)
+    // For 'bytes' of data + 8 bytes CRC = (bytes + 8) / 4 words
+    uint32_t words = (bytes + 8) / 4;
+    dma_channel_config c = dma_channel_get_default_config(SDIO_DMA_CH);
+    channel_config_set_read_increment(&c, false);
+    channel_config_set_write_increment(&c, true);
+    channel_config_set_dreq(&c, pio_get_dreq(SDIO_PIO, SDIO_DATA_SM, false));
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+    dma_channel_configure(SDIO_DMA_CH, &c,
+        buffer,
+        &SDIO_PIO->rxf[SDIO_DATA_SM],
+        words,
+        true);
+
+    // Write number of nibbles to receive to Y register
+    // data nibbles + 16 CRC nibbles - 1
+    pio_sm_put(SDIO_PIO, SDIO_DATA_SM, bytes * 2 + 16 - 1);
+
+    // Start PIO
+    pio_sm_set_enabled(SDIO_PIO, SDIO_DATA_SM, true);
+
+    return SDIO_OK;
+}
+
+sdio_status_t rp2040_sdio_rx_short_finish()
+{
+    uint32_t start = millis();
+    while (dma_channel_is_busy(SDIO_DMA_CH))
+    {
+        if ((uint32_t)(millis() - start) > 100)
+        {
+            rp2040_sdio_stop();
+            return SDIO_ERR_DATA_TIMEOUT;
+        }
+    }
+
+    pio_sm_set_enabled(SDIO_PIO, SDIO_DATA_SM, false);
+    return SDIO_OK;
+}
+
 // Check checksums for received blocks
 static void sdio_verify_rx_checksums(uint32_t maxcount)
 {

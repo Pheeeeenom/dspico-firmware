@@ -13,7 +13,9 @@
 #define TWL_S_BOXES_OFFSET                  0xC00
 
 #define ELAPSED_SYSTICK(systick_hw) (0xffffff - systick_hw->cvr)
-#define NS_SYSTICK(nanoseconds) (nanoseconds / 5)
+// CLOCK EDIT: 150 MHz = 6.67ns per tick. Was (nanoseconds / 5) for 200 MHz.
+// To revert: #define NS_SYSTICK(nanoseconds) (nanoseconds / 5)
+#define NS_SYSTICK(nanoseconds) (nanoseconds * 3 / 20)
 
 static void __time_critical_func(normCmd0Handler)(struct ntr_rom_emu_t* romEmu, u32 word, pio_hw_t* pio)
 {

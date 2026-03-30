@@ -22,8 +22,9 @@
 ; edge, it is preferrable to have a long 0 state and short 1 state.
 ;.define CLKDIV 3
 ; .define CLKDIV 5
-;for 200MHz base clock
-.define CLKDIV 8
+; CLOCK EDIT: 150MHz base clock, CLKDIV=6 for 25MHz SDIO
+; Was CLKDIV 4 for 50MHz at 200MHz. To revert to 50MHz@200MHz: .define CLKDIV 4
+.define CLKDIV 6
 .define D0 ((CLKDIV + 1) / 2 - 1)
 .define D1 (CLKDIV/2 - 1)
 .define SDIO_CLK_GPIO 3

@@ -62,4 +62,9 @@ sdio_status_t rp2040_sdio_stop();
 // (Re)initialize the SDIO interface
 void rp2040_sdio_init(int clock_divider = 1);
 
+sdio_status_t rp2040_sdio_rx_short_start(uint8_t *buffer, uint32_t bytes);
+
+// Wait for short data block reception to complete
+sdio_status_t rp2040_sdio_rx_short_finish();
+
 sdio_block_poll_status_t rp2040_sdio_rx_poll_one_block();
