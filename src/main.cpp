@@ -226,6 +226,26 @@ static void initSd(void)
     }
 }
 
+// Clean archive bits and macOS junk for known firmware files
+static void cleanSdCard(void)
+{
+    static const char* files[] = {
+        "default.nds", "dsimode.nds", "ntrboot.nds",
+        "ntrbootdsi.nds", "_picoboot.nds", "LAUNCHER.nds"
+    };
+
+    f_unlink(".DS_Store");
+
+    for (int i = 0; i < 6; i++)
+    {
+        f_chmod(files[i], 0, AM_ARC);
+
+        char dotUnderscore[32] = "._";
+        strcat(dotUnderscore, files[i]);
+        f_unlink(dotUnderscore);
+    }
+}
+
 static void tryRebootToBootsel(void)
 {
     if (!sIsSdCardMounted)
@@ -491,6 +511,7 @@ int __time_critical_func(main)()
         // Single SD init for game-time access
         sIsSdCardMounted = false;
         initSd();
+        cleanSdCard();
         tryRebootToBootsel();
     }
     else
@@ -498,6 +519,7 @@ int __time_critical_func(main)()
         // COLD PATH: no ROM in flash, must load from SD first (requires pre-power)
         sIsSdCardMounted = false;
         initSd();
+        cleanSdCard();
 
         if (!sIsSdCardMounted)
         {
